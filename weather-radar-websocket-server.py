@@ -358,10 +358,10 @@ def is_tiff_file(path: Path) -> bool:
             # Read the first four bytes that contain the TIFF signature.
             header = file_handle.read(4)
 
-    except OSError as exc:
+    except OSError as exception:
 
         # Warn when the file cannot be read for validation.
-        logger.warning("Unable to read %s for TIFF validation: %s", path, exc)
+        logger.warning("Unable to read %s for TIFF validation: %s", path, exception)
 
         # Treat unreadable files as invalid.
         return False
@@ -518,6 +518,27 @@ async def download_loop(stop: asyncio.Event) -> None:
         # Compute the target timestamp for this cycle.
         target_time = calculate_target_time(current_time)
 
+        # Calculate the next scheduled boundary for sleeping.
+        next_time = calculate_next_time(current_time)
+
+        # Compute seconds until the next scheduled run.
+        sleep_seconds = int((next_time - current_time).total_seconds())
+
+        # Avoid a zero or negative sleep interval.
+        sleep_seconds = max(1, sleep_seconds)
+
+        logger.info("Next download %s", next_time)
+
+        try:
+
+            # Sleep until the next interval or until a stop signal arrives.
+            await asyncio.wait_for(stop.wait(), timeout=sleep_seconds)
+
+        except asyncio.TimeoutError:
+
+            # Continue looping after the sleep timeout.
+            pass
+
         # Only process when the target timestamp changes.
         if last_processed != target_time:
 
@@ -552,24 +573,9 @@ async def download_loop(stop: asyncio.Event) -> None:
             # Record the timestamp we just processed.
             last_processed = target_time
 
-        # Calculate the next scheduled boundary for sleeping.
-        next_time = calculate_next_time(current_time)
 
-        # Compute seconds until the next scheduled run.
-        sleep_seconds = int((next_time - current_time).total_seconds())
 
-        # Avoid a zero or negative sleep interval.
-        sleep_seconds = max(1, sleep_seconds)
 
-        try:
-
-            # Sleep until the next interval or until a stop signal arrives.
-            await asyncio.wait_for(stop.wait(), timeout=sleep_seconds)
-
-        except asyncio.TimeoutError:
-
-            # Continue looping after the sleep timeout.
-            continue
 
 
 # Entry point that runs the server and waits for shutdown signals.
