@@ -13,7 +13,7 @@
       "VMI"
     ],
     "timezone": "Europe/Rome",
-    "interval_seconds": 600,
+    "interval": "*/10 * * * *",
     "retry_sleep_seconds": 60
   },
   "websocket_client": {
