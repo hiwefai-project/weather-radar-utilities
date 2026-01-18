@@ -13,6 +13,7 @@
       "VMI"
     ],
     "timezone": "Europe/Rome",
+    "interval_seconds": 600,
     "interval_minutes": 10,
     "retry_sleep_seconds": 60
   },
