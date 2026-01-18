@@ -49,7 +49,7 @@ All Python scripts read the shared `config.json` file in the repository root. Ex
     "base_path": "/storage/ccmmma/prometeo/data/instruments/rdr0",
     "products": ["VMI"],
     "timezone": "Europe/Rome",
-    "interval_minutes": 10,
+    "interval": "*/10 * * * *",
     "retry_sleep_seconds": 60
   },
   "websocket_client": { "url": "ws://localhost:8765/subscribe", "product_type": "VMI" },
@@ -63,8 +63,30 @@ All Python scripts read the shared `config.json` file in the repository root. Ex
 }
 ```
 
-### Cron example
-Run the launcher every 10 minutes:
-```cron
-*/10 * * * * /path/to/weather-radar-utilities/weather-radar-download
+### Cron-based download interval
+The WebSocket server uses `download.interval` with standard 5-field cron syntax. Example: `*/10 * * * *` runs every 10 minutes. Keep `download.interval_minutes` or `download.interval_seconds` only for legacy setups; `download.interval` takes precedence. 
+
+### Docker
+Build and run the WebSocket server container:
+```bash
+docker build -t weather-radar-ws -f Dockerfile .
+docker run --rm -p 8765:8765 -v /host/data:/data weather-radar-ws
+```
+
+### docker-compose.yml example
+To store images in an external volume and expose the server port on the host machine:
+```yaml
+services:
+  websocket-server:
+    image: weather-radar-ws
+    ports:
+      - "8765:8765"
+    volumes:
+      - radar-images:/data
+    environment:
+      - PYTHONUNBUFFERED=1
+
+volumes:
+  radar-images:
+    external: true
 ```

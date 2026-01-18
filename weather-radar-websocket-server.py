@@ -44,6 +44,9 @@ else:
 # Import pytz to localize timestamps in the configured timezone.
 import pytz
 
+# Import croniter to compute cron-based schedule boundaries.
+from croniter import croniter
+
 # Import WebSocket server helpers and broadcast utility.
 from websockets.asyncio.server import serve, broadcast
 
@@ -90,7 +93,13 @@ products = download_config.get("products", ["VMI"])
 # Load the timezone name for timestamp localization.
 timezone_name = download_config.get("timezone", "Europe/Rome")
 
-# Load the interval in seconds for scheduled downloads.
+# Load the cron-style interval string for scheduled downloads.
+interval_expression = download_config.get("interval")
+
+# Load the fallback interval in minutes for legacy configurations.
+interval_minutes = download_config.get("interval_minutes")
+
+# Load the fallback interval in seconds for legacy configurations.
 interval_seconds = int(download_config.get("interval_seconds", 600))
 
 # Load the retry delay in seconds between attempts.
@@ -130,6 +139,46 @@ if MAGIC_IMPORT_ERROR:
         "python-magic is unavailable; falling back to TIFF header checks (%s)",
         MAGIC_IMPORT_ERROR,
     )
+
+# Determine the cron expression for downloads using the most specific config.
+def resolve_download_cron_expression() -> str:
+
+    # Prefer an explicit cron interval when provided.
+    if interval_expression:
+
+        # Return the configured cron expression as-is.
+        return interval_expression
+
+    # Use the legacy minute interval if configured.
+    if interval_minutes:
+
+        # Convert the minute interval into a cron expression.
+        return f"*/{int(interval_minutes)} * * * *"
+
+    # When seconds align with whole minutes, convert to a cron expression.
+    if interval_seconds % 60 == 0:
+
+        # Translate seconds into minutes for cron syntax.
+        minutes = max(1, interval_seconds // 60)
+
+        # Return a cron expression that matches the derived minute cadence.
+        return f"*/{minutes} * * * *"
+
+    # Warn that we are falling back to a 10-minute cadence.
+    logger.warning(
+        "interval_seconds=%s is not divisible by 60; defaulting to */10 * * * *",
+        interval_seconds,
+    )
+
+    # Default to a 10-minute schedule when configuration is ambiguous.
+    return "*/10 * * * *"
+
+
+# Resolve the cron expression once so scheduling is consistent.
+download_cron = resolve_download_cron_expression()
+
+# Log the cron expression used for downloads.
+logger.info("Download cron schedule set to %s", download_cron)
 
 # Maintain a set of active subscriber connections.
 SUBSCRIBERS: Set = set()
@@ -422,20 +471,30 @@ def download_product(
     return None
 
 
-# Determine which timestamp to download based on the configured interval.
+# Determine which timestamp to download based on the configured cron schedule.
 def calculate_target_time(current_time: datetime) -> datetime:
 
-    # Convert the current time to an epoch integer in seconds.
-    epoch_seconds = int(current_time.timestamp())
+    # Strip seconds for cron alignment to minute boundaries.
+    rounded_time = current_time.replace(second=0, microsecond=0)
 
-    # Align the timestamp down to the nearest interval boundary.
-    aligned_epoch = epoch_seconds - (epoch_seconds % interval_seconds)
+    # Build a cron iterator anchored to the rounded current time.
+    iterator = croniter(download_cron, rounded_time)
 
-    # Choose the previous interval to ensure data availability.
-    target_epoch = aligned_epoch - interval_seconds
+    # Select the previous scheduled time to ensure data availability.
+    return iterator.get_prev(datetime)
 
-    # Convert the epoch timestamp back to a datetime object.
-    return datetime.fromtimestamp(target_epoch)
+
+# Compute the next scheduled download time for sleeping.
+def calculate_next_time(current_time: datetime) -> datetime:
+
+    # Strip seconds for cron alignment to minute boundaries.
+    rounded_time = current_time.replace(second=0, microsecond=0)
+
+    # Build a cron iterator anchored to the rounded current time.
+    iterator = croniter(download_cron, rounded_time)
+
+    # Select the next scheduled time for the sleep boundary.
+    return iterator.get_next(datetime)
 
 
 # Download radar data at the configured interval and notify subscribers.
@@ -493,11 +552,11 @@ async def download_loop(stop: asyncio.Event) -> None:
             # Record the timestamp we just processed.
             last_processed = target_time
 
-        # Calculate the next interval boundary for sleeping.
-        next_epoch = int(current_time.timestamp())
+        # Calculate the next scheduled boundary for sleeping.
+        next_time = calculate_next_time(current_time)
 
-        # Compute seconds until the next aligned boundary.
-        sleep_seconds = interval_seconds - (next_epoch % interval_seconds)
+        # Compute seconds until the next scheduled run.
+        sleep_seconds = int((next_time - current_time).total_seconds())
 
         # Avoid a zero or negative sleep interval.
         sleep_seconds = max(1, sleep_seconds)
