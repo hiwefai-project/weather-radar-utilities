@@ -13,8 +13,8 @@ import json
 # Import logging for structured log output.
 import logging
 
-# Import os for shell command execution.
-import os
+# Import requests for HTTP API calls.
+import requests
 
 # Import signal to handle graceful shutdown signals.
 import signal
@@ -418,22 +418,23 @@ def download_product(
         # Log the current attempt number.
         logger.info("Try number: %s", trys)
 
-        # Build the curl command for the API request.
-        command = (
-            f"curl '{radar_api_url}' "
-            f"-H 'accept: {headers['accept']}' "
-            f"-H 'content-type: {headers['content-type']}' "
-            f"-H 'origin: {headers['origin']}' "
-            f"-H 'priority: {headers['priority']}' "
-            f"-H 'referer: {headers['referer']}' "
-            f"-H 'sec-fetch-dest: {headers['sec-fetch-dest']}' "
-            f"-H 'sec-fetch-mode: {headers['sec-fetch-mode']}' "
-            f"-H 'sec-fetch-site: {headers['sec-fetch-site']}' "
-            f"--data-raw '{json.dumps(payload)}' --silent --output {absolute_file_path}"
-        )
-
-        # Execute the curl command in the shell.
-        os.system(command)
+        # Issue the POST request to the radar API.
+        try:
+            # Send the request with JSON payload and headers.
+            response = requests.post(
+                radar_api_url,
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+            # Raise for HTTP errors to trigger retries.
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            # Log the request failure before retrying.
+            logger.warning("Request failed for %s: %s", product, exc)
+        else:
+            # Write the response body to the destination file.
+            absolute_file_path.write_bytes(response.content)
 
         # Proceed when a valid TIFF image is downloaded.
         if is_tiff_file(absolute_file_path):
