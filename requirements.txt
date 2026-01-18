@@ -4,3 +4,4 @@ python-magic
 websockets
 websocket-client
 rel
+libmagic
