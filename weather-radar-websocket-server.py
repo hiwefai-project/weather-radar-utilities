@@ -16,6 +16,9 @@ import logging
 # Import requests for HTTP API calls.
 import requests
 
+# Import shutil for copying files in simulation mode.
+import shutil
+
 # Import signal to handle graceful shutdown signals.
 import signal
 
@@ -74,6 +77,15 @@ log_level = getattr(logging, log_level_name, logging.INFO)
 
 # Extract the download configuration section.
 download_config = config.get("download", {})
+
+# Extract the simulation configuration section for local playback.
+simulation_config = download_config.get("simulation", {})
+
+# Determine whether simulation mode is enabled.
+simulation_enabled = bool(simulation_config.get("enabled", False))
+
+# Capture the configured simulation source directory.
+simulation_source_dir = Path(simulation_config.get("source_dir", ""))
 
 # Load the maximum retry count for downloads.
 max_trys = download_config.get("max_trys", 7)
@@ -179,6 +191,12 @@ download_cron = resolve_download_cron_expression()
 
 # Log the cron expression used for downloads.
 logger.info("Download cron schedule set to %s", download_cron)
+
+# Log simulation mode configuration for transparency.
+if simulation_enabled:
+
+    # Inform operators that simulation mode is active.
+    logger.info("Simulation mode enabled; source directory: %s", simulation_source_dir)
 
 # Maintain a set of active subscriber connections.
 SUBSCRIBERS: Set = set()
@@ -332,6 +350,111 @@ def build_download_headers() -> dict:
         "sec-fetch-mode": "cors",
         # Indicate the fetch site for CORS.
         "sec-fetch-site": "same-site",
+    }
+
+# Load and sort simulation files from the configured directory.
+def load_simulation_files(source_dir: Path) -> list[Path]:
+
+    # Warn when the simulation directory is not configured.
+    if not source_dir:
+
+        # Log that the simulation source directory is missing.
+        logger.warning("Simulation mode enabled but no source_dir configured")
+
+        # Return an empty list to signal there is nothing to process.
+        return []
+
+    # Warn when the simulation directory does not exist.
+    if not source_dir.exists():
+
+        # Log that the configured directory is unavailable.
+        logger.warning("Simulation source directory %s does not exist", source_dir)
+
+        # Return an empty list to avoid raising exceptions later.
+        return []
+
+    # Collect only file entries from the source directory.
+    files = [path for path in source_dir.iterdir() if path.is_file()]
+
+    # Sort the files alphabetically to preserve deterministic ordering.
+    files.sort(key=lambda path: path.name)
+
+    # Warn when no files are available to simulate.
+    if not files:
+
+        # Log that the directory is empty.
+        logger.warning("Simulation source directory %s contains no files", source_dir)
+
+    # Return the sorted file list for playback.
+    return files
+
+
+# Derive the product type from a filename or fall back to configuration.
+def derive_product_type(file_path: Path) -> str:
+
+    # Use the configured product list when available.
+    default_product = products[0] if products else "VMI"
+
+    # Split the filename stem into parts to extract the product suffix.
+    parts = file_path.stem.split("_")
+
+    # Return the last segment when it exists as a product hint.
+    if parts:
+
+        # Provide the final filename segment as the product type.
+        return parts[-1]
+
+    # Fall back to the configured product type when parsing fails.
+    return default_product
+
+
+# Copy a simulation file into place and build the update payload.
+def copy_simulation_file(
+    source_file: Path,
+    target_time: datetime,
+    unix_time_ms: int,
+) -> Optional[dict]:
+
+    # Ensure the base path exists for storing the simulated file.
+    base_path.mkdir(parents=True, exist_ok=True)
+
+    # Build the destination path using the source filename.
+    destination_file = base_path / source_file.name
+
+    try:
+
+        # Copy the file to the destination, preserving metadata.
+        shutil.copy2(source_file, destination_file)
+
+    except OSError as exception:
+
+        # Log the copy failure so operators can inspect the issue.
+        logger.warning("Failed to copy simulation file %s: %s", source_file, exception)
+
+        # Skip broadcasting when the file cannot be copied.
+        return None
+
+    # Derive the product type from the filename.
+    product = derive_product_type(destination_file)
+
+    # Build the public URL for the simulated file when configured.
+    file_url = (
+        f"{base_url.rstrip('/')}/{destination_file.name}" if base_url else ""
+    )
+
+    # Log the simulated file playback.
+    logger.info("Simulated %s for %s", destination_file.name, target_time)
+
+    # Build the update payload to broadcast.
+    return {
+        # Identify the product type in the update.
+        "productType": product,
+        # Provide the product timestamp in Unix milliseconds.
+        "productDate": unix_time_ms,
+        # Provide the local file path for the product.
+        "file": str(destination_file),
+        # Provide the public URL for the product.
+        "url": file_url,
     }
 
 
@@ -522,6 +645,12 @@ async def download_loop(stop: asyncio.Event) -> None:
     # Store the last processed timestamp to avoid duplicates.
     last_processed: Optional[datetime] = None
 
+    # Cache the simulation file list for sequential playback.
+    simulation_files: list[Path] = []
+
+    # Track the current index within the simulation file list.
+    simulation_index = 0
+
     # Build the shared headers for the download API request.
     headers = build_download_headers()
 
@@ -574,25 +703,66 @@ async def download_loop(stop: asyncio.Event) -> None:
             # Log the UTC timestamp being processed.
             logger.info("Processing radar timestamp %s", utc_time)
 
-            # Iterate through each configured product type.
-            for product in products:
+            # Handle simulation mode by copying files from disk.
+            if simulation_enabled:
 
-                # Download the product in a worker thread to avoid blocking.
-                message = await asyncio.to_thread(
-                    download_product,
-                    product,
-                    target_time,
-                    utc_time,
-                    unix_time_ms,
-                    headers,
-                    stop,
-                )
+                # Refresh the simulation file list when exhausted.
+                if not simulation_files or simulation_index >= len(simulation_files):
 
-                # Broadcast updates only when a download succeeds.
-                if message:
+                    # Reload and sort the files from the source directory.
+                    simulation_files = load_simulation_files(simulation_source_dir)
 
-                    # Notify all subscribers about the new product.
-                    await broadcast_update(message)
+                    # Reset the index to the start of the list.
+                    simulation_index = 0
+
+                # Only proceed when a simulation file is available.
+                if simulation_files:
+
+                    # Select the next file in alphabetical order.
+                    source_file = simulation_files[simulation_index]
+
+                    # Advance the index for the next interval.
+                    simulation_index += 1
+
+                    # Copy the file and build a broadcast payload.
+                    message = copy_simulation_file(
+                        source_file,
+                        target_time,
+                        unix_time_ms,
+                    )
+
+                    # Broadcast updates only when the copy succeeds.
+                    if message:
+
+                        # Notify all subscribers about the simulated product.
+                        await broadcast_update(message)
+
+                else:
+
+                    # Warn when no simulation files are available.
+                    logger.warning("No simulation files available for %s", simulation_source_dir)
+
+            else:
+
+                # Iterate through each configured product type.
+                for product in products:
+
+                    # Download the product in a worker thread to avoid blocking.
+                    message = await asyncio.to_thread(
+                        download_product,
+                        product,
+                        target_time,
+                        utc_time,
+                        unix_time_ms,
+                        headers,
+                        stop,
+                    )
+
+                    # Broadcast updates only when a download succeeds.
+                    if message:
+
+                        # Notify all subscribers about the new product.
+                        await broadcast_update(message)
 
             # Record the timestamp we just processed.
             last_processed = target_time
