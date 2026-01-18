@@ -1,0 +1,1 @@
+Here the downloaded weather radar image files.
