@@ -6,14 +6,41 @@ import rel
 import json
 # Import logging for structured, configurable output.
 import logging
+# Import Path for loading the shared configuration file.
+from pathlib import Path
 
-# Define the WebSocket URL for subscribing to updates.
-url_ws = "ws://localhost:8765/subscribe"
+# Define the path to the shared JSON configuration file.
+CONFIG_PATH = Path(__file__).with_name("config.json")
 
+
+# Load and return the JSON configuration used by all scripts.
+def load_config() -> dict:
+    # Open the configuration file with UTF-8 encoding.
+    with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+        # Parse the JSON payload into a dictionary.
+        return json.load(config_file)
+
+
+# Load the shared configuration once at startup.
+config = load_config()
+# Extract the logging configuration section.
+logging_config = config.get("logging", {})
+# Normalize the configured log level to uppercase.
+log_level_name = logging_config.get("level", "INFO").upper()
+# Resolve the log level or fall back to INFO.
+log_level = getattr(logging, log_level_name, logging.INFO)
+
+# Configure logging with a default INFO level.
+logging.basicConfig(level=log_level)
 # Create a module-level logger for this client.
 logger = logging.getLogger(__name__)
-# Configure logging with a default INFO level.
-logging.basicConfig(level=logging.INFO)
+
+# Extract the WebSocket client configuration section.
+client_config = config.get("websocket_client", {})
+# Define the WebSocket URL for subscribing to updates.
+url_ws = client_config.get("url", "ws://localhost:8765/subscribe")
+# Define the product type to filter on for logging.
+product_type = client_config.get("product_type", "VMI")
 
 # Log a startup banner so operators know the client is running.
 logger.info("Weather Radar Websocket Client")
@@ -27,8 +54,8 @@ def on_message(ws, message):
     json_message = json.loads(message)
     # Check that the message contains a product type field.
     if "productType" in json_message:
-        # Focus on VMI products, which are of interest here.
-        if json_message["productType"] == "VMI":
+        # Focus on the configured product type of interest.
+        if json_message["productType"] == product_type:
             # Log the file path associated with the update.
             logger.info(json_message["file"])
             # Log the URL where the product can be fetched.

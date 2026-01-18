@@ -7,20 +7,51 @@ import json
 import logging
 # Import signal to handle graceful shutdown signals.
 import signal
+# Import Path for loading the shared configuration file.
+from pathlib import Path
 # Import Set typing for type annotations of subscriber collections.
 from typing import Set
 
 # Import WebSocket server helpers and broadcast utility.
 from websockets.asyncio.server import serve, broadcast
 
+# Define the path to the shared JSON configuration file.
+CONFIG_PATH = Path(__file__).with_name("config.json")
+
+
+# Load and return the JSON configuration used by all scripts.
+def load_config() -> dict:
+    # Open the configuration file with UTF-8 encoding.
+    with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+        # Parse the JSON payload into a dictionary.
+        return json.load(config_file)
+
+
+# Load the shared configuration once at startup.
+config = load_config()
+# Extract the logging configuration section.
+logging_config = config.get("logging", {})
+# Normalize the configured log level to uppercase.
+log_level_name = logging_config.get("level", "INFO").upper()
+# Resolve the log level or fall back to INFO.
+log_level = getattr(logging, log_level_name, logging.INFO)
+
+# Extract the WebSocket server configuration section.
+server_config = config.get("websocket_server", {})
 # Bind to all interfaces so containers or hosts can connect.
-HOST = "0.0.0.0"
-# Use the default port for the WebSocket server.
-PORT = 8765
+HOST = server_config.get("host", "0.0.0.0")
+# Use the configured port for the WebSocket server.
+PORT = server_config.get("port", 8765)
+# Configure the maximum message size.
+MAX_SIZE = server_config.get("max_size", 2**20)
+# Configure keepalive ping interval.
+PING_INTERVAL = server_config.get("ping_interval", 20)
+# Configure keepalive ping timeout.
+PING_TIMEOUT = server_config.get("ping_timeout", 20)
 
 # Configure logging with timestamps and levels for observability.
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 # Create a named logger for the WebSocket bus.
@@ -146,11 +177,11 @@ async def main() -> None:
         HOST,
         PORT,
         # Limit maximum message size to protect the server.
-        max_size=2**20,
+        max_size=MAX_SIZE,
         # Enable keepalive pings to detect dead connections.
-        ping_interval=20,
+        ping_interval=PING_INTERVAL,
         # Configure the ping timeout.
-        ping_timeout=20,
+        ping_timeout=PING_TIMEOUT,
         # You could add origin checks with 'origins={...}' if needed.
     ):
         # Log the available endpoints once the server is live.
