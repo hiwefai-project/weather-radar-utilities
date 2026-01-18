@@ -383,6 +383,7 @@ def download_product(
     utc_time: datetime,
     unix_time_ms: int,
     headers: dict,
+    stop: asyncio.Event,
 ) -> Optional[dict]:
 
     # Build the destination directory for the date-based folder structure.
@@ -415,6 +416,12 @@ def download_product(
 
     # Retry until the maximum attempts are exhausted.
     while trys < max_trys:
+        # Exit early when a shutdown signal is received.
+        if stop.is_set():
+            # Log that the download was interrupted by shutdown.
+            logger.info("Download for %s interrupted by shutdown", product)
+            # Stop processing this product.
+            return None
         # Log the current attempt number.
         logger.info("Try number: %s", trys)
 
@@ -459,8 +466,16 @@ def download_product(
         # Log that the retry delay is starting.
         logger.warning("Waiting...")
 
-        # Sleep for the configured retry delay.
-        time.sleep(retry_sleep_seconds)
+        # Sleep for the configured retry delay while checking for shutdown.
+        for _ in range(int(retry_sleep_seconds)):
+            # Exit early when a shutdown signal is received.
+            if stop.is_set():
+                # Log that the retry sleep was interrupted by shutdown.
+                logger.info("Retry sleep interrupted for %s due to shutdown", product)
+                # Stop processing this product.
+                return None
+            # Sleep for one second before re-checking the stop signal.
+            time.sleep(1)
 
         # Log that another attempt will start.
         logger.warning("Retrying...")
@@ -540,6 +555,13 @@ async def download_loop(stop: asyncio.Event) -> None:
             # Continue looping after the sleep timeout.
             pass
 
+        # Exit promptly if a shutdown signal arrives.
+        if stop.is_set():
+            # Log that the download loop is stopping.
+            logger.info("Download loop stopping due to shutdown signal")
+            # Break out of the loop to exit cleanly.
+            break
+
         # Only process when the target timestamp changes.
         if last_processed != target_time:
 
@@ -563,6 +585,7 @@ async def download_loop(stop: asyncio.Event) -> None:
                     utc_time,
                     unix_time_ms,
                     headers,
+                    stop,
                 )
 
                 # Broadcast updates only when a download succeeds.
