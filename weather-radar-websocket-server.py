@@ -28,8 +28,18 @@ from pathlib import Path
 # Import Set typing for type annotations of subscriber collections.
 from typing import Optional, Set
 
-# Import magic to verify downloaded file types.
-import magic
+# Try to import magic for MIME type detection.
+try:
+    # Import magic to verify downloaded file types.
+    import magic
+except ImportError as exc:
+    # Fall back when libmagic is missing.
+    magic = None
+    # Store the import error for later logging.
+    MAGIC_IMPORT_ERROR = exc
+else:
+    # Record that magic loaded successfully.
+    MAGIC_IMPORT_ERROR = None
 
 # Import pytz to localize timestamps in the configured timezone.
 import pytz
@@ -112,6 +122,14 @@ logging.basicConfig(
 
 # Create a named logger for the WebSocket bus.
 logger = logging.getLogger("ws-bus")
+
+# Warn if libmagic is unavailable so users know why validation is limited.
+if MAGIC_IMPORT_ERROR:
+    # Log the missing libmagic dependency with details.
+    logger.warning(
+        "python-magic is unavailable; falling back to TIFF header checks (%s)",
+        MAGIC_IMPORT_ERROR,
+    )
 
 # Maintain a set of active subscriber connections.
 SUBSCRIBERS: Set = set()
@@ -268,6 +286,47 @@ def build_download_headers() -> dict:
     }
 
 
+# Detect whether a file is a TIFF image using libmagic or header checks.
+def is_tiff_file(path: Path) -> bool:
+
+    # Use libmagic when it is available for robust detection.
+    if magic is not None:
+
+        # Detect the file MIME type for verification.
+        mime_type = magic.from_file(str(path), mime=True)
+
+        # Log the MIME type for debugging.
+        logger.debug("Detected MIME type %s for %s", mime_type, path)
+
+        # Return whether the MIME type matches a TIFF image.
+        return mime_type == "image/tiff"
+
+    try:
+
+        # Open the file in binary mode for header inspection.
+        with path.open("rb") as file_handle:
+
+            # Read the first four bytes that contain the TIFF signature.
+            header = file_handle.read(4)
+
+    except OSError as exc:
+
+        # Warn when the file cannot be read for validation.
+        logger.warning("Unable to read %s for TIFF validation: %s", path, exc)
+
+        # Treat unreadable files as invalid.
+        return False
+
+    # TIFF files start with either little-endian or big-endian signatures.
+    is_tiff = header in (b"II*\x00", b"MM\x00*")
+
+    # Log the header validation result.
+    logger.debug("TIFF header validation for %s: %s", path, is_tiff)
+
+    # Return the header validation result.
+    return is_tiff
+
+
 # Download a single product for the specified timestamp.
 def download_product(
     product: str,
@@ -327,14 +386,8 @@ def download_product(
         # Execute the curl command in the shell.
         os.system(command)
 
-        # Detect the file MIME type for verification.
-        mime_type = magic.from_file(str(absolute_file_path), mime=True)
-
-        # Log the MIME type for debugging.
-        logger.warning(mime_type)
-
         # Proceed when a valid TIFF image is downloaded.
-        if mime_type == "image/tiff":
+        if is_tiff_file(absolute_file_path):
             # Log the successful download.
             logger.info("Downloaded %s for %s", product, target_time)
 
