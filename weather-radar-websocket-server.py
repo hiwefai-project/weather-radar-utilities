@@ -252,57 +252,12 @@ async def broadcast_update(payload: dict) -> None:
     logger.info("Broadcasted to %d subscriber(s)", len(SUBSCRIBERS))
 
 
-# Receive JSON messages from an updater and broadcast to subscribers.
-async def updater_handler(ws) -> None:
-
-    # Log that an updater has connected.
-    logger.info("Updater connected")
-
-    try:
-
-        # Acknowledge the updater connection.
-        await ws.send(json.dumps({"role": "updater", "status": "ok"}))
-
-        # Iterate over messages from the updater.
-        async for message in ws:
-
-            # Ensure messages are valid JSON text.
-            try:
-
-                # Attempt to parse the incoming JSON payload.
-                payload = json.loads(message)
-
-            except json.JSONDecodeError:
-
-                # Build an error response for invalid JSON.
-                err = {"error": "invalid_json", "detail": "Message must be valid JSON text"}
-
-                # Send the error back to the updater.
-                await ws.send(json.dumps(err))
-
-                # Warn that a malformed message was rejected.
-                logger.warning("Rejected non-JSON message from updater")
-
-                # Skip broadcasting when the payload is invalid.
-                continue
-
-            # Broadcast the payload to all subscribers.
-            await broadcast_update(payload)
-
-            # Send an acknowledgment back to the updater.
-            await ws.send(json.dumps({"result": "broadcasted"}))
-
-    finally:
-        # Log that the updater disconnected.
-        logger.info("Updater disconnected")
-
 # Route connections based on the request path.
 async def route(ws) -> None:
     # Document the expected routes for the server.
     """
     Route connections by path:
       - /subscribe -> subscriber role
-      - /update    -> updater role
     """
 
     # Extract the request path from the websocket object.
@@ -313,15 +268,10 @@ async def route(ws) -> None:
 
         await subscriber_handler(ws)
 
-    # Dispatch to the updater handler for the update endpoint.
-    elif path == "/update":
-
-        await updater_handler(ws)
-
     else:
 
         # Prepare a reason for rejecting unknown paths.
-        reason = f"Unknown path '{path}'. Use /subscribe or /update."
+        reason = f"Unknown path '{path}'. Use /subscribe"
 
         # Warn about the unexpected path.
         logger.warning(reason)
@@ -335,21 +285,23 @@ def build_download_headers() -> dict:
     # Assemble the headers that mimic the browser request.
     return {
         # Accept JSON responses from the API.
-        "accept": "application/json, text/plain, */*",
+        #"accept": "application/json, text/plain, */*",
         # Set the content type for the JSON payload.
         "content-type": "application/json",
         # Provide the origin header expected by the API.
-        "origin": "https://radar.protezionecivile.it",
+        #"origin": "https://radar.protezionecivile.it",
         # Set the priority header as seen in browser requests.
-        "priority": "u=1, i",
+        #"priority": "u=1, i",
         # Set the referer header expected by the API.
-        "referer": "https://radar.protezionecivile.it/",
+        #"referer": "https://radar.protezionecivile.it/",
         # Indicate the fetch destination for CORS.
-        "sec-fetch-dest": "empty",
+        #"sec-fetch-dest": "empty",
         # Indicate the fetch mode for CORS.
-        "sec-fetch-mode": "cors",
+        #"sec-fetch-mode": "cors",
         # Indicate the fetch site for CORS.
-        "sec-fetch-site": "same-site",
+        #"sec-fetch-site": "same-site",
+        # User agent
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'
     }
 
 # Load and sort simulation files from the configured directory.
@@ -499,7 +451,6 @@ def is_tiff_file(path: Path) -> bool:
     return is_tiff
 
 
-# Download a single product for the specified timestamp.
 def download_product(
     product: str,
     target_time: datetime,
@@ -508,106 +459,156 @@ def download_product(
     headers: dict,
     stop: asyncio.Event,
 ) -> Optional[dict]:
+    """
+    Download a single radar product for the specified timestamp.
+
+    New API behavior:
+      1) POST to radar_api_url returns JSON containing a short-lived pre-signed S3 URL in field "url"
+      2) Download the GeoTIFF from that URL (GET)
+      3) Keep the same retry / stop / output dict semantics as the original implementation.
+    """
 
     # Build the destination directory for the date-based folder structure.
     file_path = base_path / utc_time.strftime("%Y") / utc_time.strftime("%m") / utc_time.strftime("%d")
 
     # Ensure the destination directory exists before downloading files.
     if not file_path.exists():
-        # Create the directory tree as needed.
         file_path.mkdir(parents=True)
 
-    # Construct the filename for the current product.
+    # Construct the filename for the current product (keep your existing naming).
     file_name = f"rdr0_d01_{utc_time.strftime('%Y%m%dZ%H%M')}_{product}.tiff"
 
     # Build the payload required by the API.
-    payload = {
-        # Identify which product type to fetch.
-        "productType": product,
-        # Provide the product timestamp in Unix milliseconds.
-        "productDate": unix_time_ms,
-    }
+    payload = json.dumps(json.loads('{"productType":"'+ product + '","productDate":'+str(unix_time_ms)+'}')).replace("\": ","\":").replace(", \"",",\"")
 
     # Build the absolute file path for the downloaded file.
     absolute_file_path = file_path / file_name
 
-    # Construct the public URL for this product.
+    # Construct the public URL for this product (keep your existing public URL scheme).
     file_url = f"{base_url}/{utc_time.strftime('%Y')}/{utc_time.strftime('%m')}/{utc_time.strftime('%d')}/{file_name}"
 
-    # Initialize the retry counter.
     trys = 0
-
-    # Retry until the maximum attempts are exhausted.
     while trys < max_trys:
-        # Exit early when a shutdown signal is received.
         if stop.is_set():
-            # Log that the download was interrupted by shutdown.
             logger.info("Download for %s interrupted by shutdown", product)
-            # Stop processing this product.
             return None
-        # Log the current attempt number.
+
         logger.info("Try number: %s", trys)
 
-        # Issue the POST request to the radar API.
+        # 1) Ask the API for a pre-signed download URL
+        presigned_url = None
         try:
-            # Send the request with JSON payload and headers.
-            response = requests.post(
+            logger.info("Url: %s", radar_api_url)
+            logger.info("Headers: %s", headers)
+            logger.info("Payload: %s", payload)
+
+            curl_command = "curl " + radar_api_url + " -H 'content-type: " + headers['content-type'] + "' -d '" + payload + "'"
+            logger.info("Curl command: %s", curl_command)
+
+            # IMPORTANT: send JSON body, but handle the fact the endpoint returns JSON always
+            #meta_resp = requests.post(
+            #    radar_api_url,  # e.g. https://radar-api.protezionecivile.it/downloadProduct
+            #    data=payload,
+            #    headers=headers,
+            #    timeout=30,
+            #)
+
+            logger.info("POST %s json=%s", radar_api_url, payload)
+            meta_resp = requests.post(
                 radar_api_url,
-                json=payload,
-                headers=headers,
+                json= {"productType": product, "productDate": int(unix_time_ms)},
+                headers={"content-type": "application/json"},
                 timeout=30,
             )
-            # Raise for HTTP errors to trigger retries.
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            # Log the request failure before retrying.
-            logger.warning("Request failed for %s: %s", product, exc)
+            logger.info("HTTP %s CT=%s body=%r", meta_resp.status_code, meta_resp.headers.get("content-type"),meta_resp.text[:300])
+
+
+        except requests.RequestException as exception:
+            logger.warning("Metadata request failed for %s: %s", product, exception)
         else:
-            # Write the response body to the destination file.
-            absolute_file_path.write_bytes(response.content)
+            # Some deployments may return non-2xx with JSON body. We parse if possible anyway.
+            ct = (meta_resp.headers.get("content-type") or "").lower()
+
+            if "application/json" in ct:
+                try:
+                    meta = meta_resp.json()
+                except ValueError:
+                    meta = None
+            else:
+                meta = None
+
+            if meta_resp.ok and isinstance(meta, dict) and meta.get("url"):
+                presigned_url = meta["url"]
+            else:
+                # Provide best-effort diagnostics for logging
+                if isinstance(meta, dict):
+                    logger.warning(
+                        "Metadata request not successful for %s (HTTP %s). Body: %s",
+                        product,
+                        meta_resp.status_code,
+                        meta,
+                    )
+                else:
+                    logger.warning(
+                        "Metadata request not successful for %s (HTTP %s). Content-Type=%s, BodySnippet=%r",
+                        product,
+                        meta_resp.status_code,
+                        ct,
+                        (meta_resp.text or "")[:500],
+                    )
+
+        # 2) If we obtained the pre-signed URL, download the GeoTIFF
+        if presigned_url and not stop.is_set():
+            try:
+                # Use streaming GET for large GeoTIFFs
+                with requests.get(presigned_url, stream=True, timeout=60) as tif_resp:
+                    # If this fails, it might be because the URL expired (expiresSeconds ~ 300)
+                    tif_resp.raise_for_status()
+
+                    # Write to disk (atomic-ish)
+                    tmp_path = absolute_file_path.with_suffix(absolute_file_path.suffix + ".part")
+                    with open(tmp_path, "wb") as f:
+                        for chunk in tif_resp.iter_content(chunk_size=1024 * 1024):
+                            if stop.is_set():
+                                logger.info("Download interrupted for %s by shutdown", product)
+                                f.close()
+                                tmp_path.unlink(missing_ok=True)
+                                return None
+                            if chunk:
+                                f.write(chunk)
+                    tmp_path.replace(absolute_file_path)
+
+            except requests.RequestException as exception:
+                logger.warning("GeoTIFF download failed for %s: %s", product, exception)
+            except OSError as exception:
+                logger.warning("File write failed for %s: %s", product, exception)
 
         # Proceed when a valid TIFF image is downloaded.
         if is_tiff_file(absolute_file_path):
-            # Log the successful download.
             logger.info("Downloaded %s for %s", product, target_time)
-
-            # Build the update payload to broadcast.
             return {
-                # Identify the product type in the update.
                 "productType": product,
-                # Provide the product timestamp in Unix milliseconds.
                 "productDate": unix_time_ms,
-                # Provide the local file path for the product.
                 "file": str(absolute_file_path),
-                # Provide the public URL for the product.
                 "url": file_url,
             }
 
-        # Remove the invalid or incomplete file.
+        # Remove invalid/incomplete file and retry
         absolute_file_path.unlink(missing_ok=True)
 
-        # Log that the retry delay is starting.
         logger.warning("Waiting...")
 
-        # Sleep for the configured retry delay while checking for shutdown.
         for _ in range(int(retry_sleep_seconds)):
-            # Exit early when a shutdown signal is received.
             if stop.is_set():
-                # Log that the retry sleep was interrupted by shutdown.
                 logger.info("Retry sleep interrupted for %s due to shutdown", product)
-                # Stop processing this product.
                 return None
-            # Sleep for one second before re-checking the stop signal.
             time.sleep(1)
 
-        # Log that another attempt will start.
         logger.warning("Retrying...")
+        trys += 1
 
-        # Increment the retry counter.
-        trys = trys + 1
-
-    # Return None when all retries are exhausted.
     return None
+
 
 
 # Determine which timestamp to download based on the configured cron schedule.
@@ -698,7 +699,7 @@ async def download_loop(stop: asyncio.Event) -> None:
             utc_time = local_timezone.localize(target_time, is_dst=None).astimezone(pytz.utc)
 
             # Convert the timestamp to Unix milliseconds for the API payload.
-            unix_time_ms = int(1000 * time.mktime(target_time.timetuple()))
+            unix_time_ms = int(utc_time.timestamp() * 1000)
 
             # Log the UTC timestamp being processed.
             logger.info("Processing radar timestamp %s", utc_time)
@@ -821,7 +822,7 @@ async def main() -> None:
     ):
 
         # Log the available endpoints once the server is live.
-        logger.info("Server is running. Endpoints: /subscribe, /update")
+        logger.info("Server is running. Endpoints: /subscribe")
 
         # Wait until a shutdown signal is received.
         await stop.wait()
