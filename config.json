@@ -6,7 +6,7 @@
   "download": {
     "max_trys": 7,
     "websocket_url": "ws://localhost:8765/update",
-    "radar_api_url": "https://radar-api.protezionecivile.it/wide/product/downloadProduct",
+    "radar_api_url": "https://radar-api.protezionecivile.it/downloadProduct",
     "base_url": "http://localhost:8080/instruments/rdr0",
     "base_path": "data/instruments/rdr0",
     "products": [
