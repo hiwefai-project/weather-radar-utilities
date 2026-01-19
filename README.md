@@ -41,12 +41,6 @@ All Python scripts read the shared `config.json` file in the repository root. Ex
     "retry_sleep_seconds": 60
   },
   "websocket_client": { "url": "ws://localhost:8765/subscribe", "product_type": "VMI" },
-  "update_sender": {
-    "websocket_url": "ws://localhost:8765/update",
-    "product_type": "VMI",
-    "file_path": "/storage/abc.tiff",
-    "file_url": "http://abc.tiff"
-  },
   "websocket_server": { "host": "0.0.0.0", "port": 8765 }
 }
 ```
