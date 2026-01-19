@@ -3,10 +3,8 @@
 Utilities for managing data acquisition and distribution for the Italian Department of Civil Protection weather radar products.
 
 ## Contents
-- **Downloader** (`weather-radar-download.py`): Fetches radar products and notifies the WebSocket server.
 - **WebSocket server** (`weather-radar-websocket-server.py`): Broadcasts update events to subscribed clients.
 - **WebSocket client** (`weather-radar-websocket-client.py`): Subscribes to updates and logs incoming product info.
-- **Update notifier** (`weather-radar-update.py`): Sends an update message to the server.
 
 ## Requirements
 - Python 3.9+
@@ -24,16 +22,6 @@ Utilities for managing data acquisition and distribution for the Italian Departm
 2. **Start a subscriber**
    ```bash
    python weather-radar-websocket-client.py
-   ```
-
-3. **Send an update**
-   ```bash
-   python weather-radar-update.py
-   ```
-
-4. **Run the downloader (cron-friendly launcher)**
-   ```bash
-   ./weather-radar-download
    ```
 
 ## Configuration
