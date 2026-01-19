@@ -16,7 +16,9 @@
     "interval": "*/10 * * * *",
     "simulation": {
       "enabled": false,
-      "source_dir": "data/weather-radar"
+      "source_dir": "data/weather-radar",
+      "starting_datetime": "20251223T120000Z",
+      "time_step": 300
     },
     "retry_sleep_seconds": 60
   },
