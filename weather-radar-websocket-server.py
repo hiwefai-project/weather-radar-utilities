@@ -409,22 +409,8 @@ def build_download_headers() -> dict:
 
     # Assemble the headers that mimic the browser request.
     return {
-        # Accept JSON responses from the API.
-        #"accept": "application/json, text/plain, */*",
         # Set the content type for the JSON payload.
         "content-type": "application/json",
-        # Provide the origin header expected by the API.
-        #"origin": "https://radar.protezionecivile.it",
-        # Set the priority header as seen in browser requests.
-        #"priority": "u=1, i",
-        # Set the referer header expected by the API.
-        #"referer": "https://radar.protezionecivile.it/",
-        # Indicate the fetch destination for CORS.
-        #"sec-fetch-dest": "empty",
-        # Indicate the fetch mode for CORS.
-        #"sec-fetch-mode": "cors",
-        # Indicate the fetch site for CORS.
-        #"sec-fetch-site": "same-site",
         # User agent
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.95 Safari/537.36'
     }
@@ -636,9 +622,6 @@ def download_product(
     # Construct the filename for the current product (keep your existing naming).
     file_name = f"rdr0_d01_{utc_time.strftime('%Y%m%dZ%H%M')}_{product}.tiff"
 
-    # Build the payload required by the API.
-    payload = json.dumps(json.loads('{"productType":"'+ product + '","productDate":'+str(unix_time_ms)+'}')).replace("\": ","\":").replace(", \"",",\"")
-
     # Build the absolute file path for the downloaded file.
     absolute_file_path = file_path / file_name
 
@@ -656,30 +639,13 @@ def download_product(
         # 1) Ask the API for a pre-signed download URL
         presigned_url = None
         try:
-            logger.info("Url: %s", radar_api_url)
-            logger.info("Headers: %s", headers)
-            logger.info("Payload: %s", payload)
 
-            curl_command = "curl " + radar_api_url + " -H 'content-type: " + headers['content-type'] + "' -d '" + payload + "'"
-            logger.info("Curl command: %s", curl_command)
-
-            # IMPORTANT: send JSON body, but handle the fact the endpoint returns JSON always
-            #meta_resp = requests.post(
-            #    radar_api_url,  # e.g. https://radar-api.protezionecivile.it/downloadProduct
-            #    data=payload,
-            #    headers=headers,
-            #    timeout=30,
-            #)
-
-            logger.info("POST %s json=%s", radar_api_url, payload)
             meta_resp = requests.post(
                 radar_api_url,
                 json= {"productType": product, "productDate": int(unix_time_ms)},
                 headers={"content-type": "application/json"},
                 timeout=30,
             )
-            logger.info("HTTP %s CT=%s body=%r", meta_resp.status_code, meta_resp.headers.get("content-type"),meta_resp.text[:300])
-
 
         except requests.RequestException as exception:
             logger.warning("Metadata request failed for %s: %s", product, exception)
