@@ -37,7 +37,10 @@ mobile usability, and extended the “history” view to access up to 14 days of
    ```
 
 ## Configuration
-All Python scripts read the shared `config.json` file in the repository root. Example:
+All Python scripts read the shared `config.json` file in the repository root.
+
+### Regular configuration
+Example configuration for live downloads plus the optional static file web server:
 ```json
 {
   "logging": { "level": "INFO", "download_log_file": "weather-radar-download.log" },
@@ -53,7 +56,28 @@ All Python scripts read the shared `config.json` file in the repository root. Ex
     "retry_sleep_seconds": 60
   },
   "websocket_client": { "url": "ws://localhost:8765/subscribe", "product_type": "VMI" },
-  "websocket_server": { "host": "0.0.0.0", "port": 8765 }
+  "websocket_server": { "host": "0.0.0.0", "port": 8765 },
+  "webserver_server": { "enabled": true, "port": 8080 }
+}
+```
+When `webserver_server.enabled` is true, the server exposes `download.base_path` over HTTP on `0.0.0.0:<port>`.
+
+### Simulator configuration
+Enable simulation mode to replay GeoTIFFs from disk instead of downloading new files:
+```json
+{
+  "download": {
+    "base_path": "data/instruments/rdr0",
+    "interval": "*/10 * * * *",
+    "simulation": {
+      "enabled": true,
+      "source_dir": "data/weather-radar",
+      "starting_datetime": "20251223T120000Z",
+      "time_step": 300
+    }
+  },
+  "websocket_server": { "host": "0.0.0.0", "port": 8765 },
+  "webserver_server": { "enabled": true, "port": 8080 }
 }
 ```
 

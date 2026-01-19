@@ -10,6 +10,9 @@ from datetime import datetime
 # Import json for serializing and parsing message payloads.
 import json
 
+# Import http.server to expose a lightweight static file server.
+import http.server
+
 # Import logging for structured log output.
 import logging
 
@@ -21,6 +24,9 @@ import shutil
 
 # Import signal to handle graceful shutdown signals.
 import signal
+
+# Import threading to run the optional web server in the background.
+import threading
 
 # Import time for Unix timestamp conversion.
 import time
@@ -129,6 +135,9 @@ simulation_time_step_seconds = max(1, simulation_time_step_seconds)
 # Extract the WebSocket server configuration section.
 server_config = config.get("websocket_server", {})
 
+# Extract the optional web server configuration section.
+webserver_config = config.get("webserver_server", {})
+
 # Bind to all interfaces so containers or hosts can connect.
 HOST = server_config.get("host", "0.0.0.0")
 
@@ -143,6 +152,15 @@ PING_INTERVAL = server_config.get("ping_interval", 20)
 
 # Configure keepalive ping timeout.
 PING_TIMEOUT = server_config.get("ping_timeout", 20)
+
+# Determine whether the optional web server should run.
+WEBSERVER_ENABLED = bool(webserver_config.get("enabled", False))
+
+# Bind the web server to all interfaces by default.
+WEBSERVER_HOST = "0.0.0.0"
+
+# Configure the port for the optional web server.
+WEBSERVER_PORT = int(webserver_config.get("port", 8080))
 
 # Configure logging with timestamps and levels for observability.
 logging.basicConfig(
@@ -305,6 +323,58 @@ async def broadcast_update(payload: dict) -> None:
 
     # Log how many subscribers received the update.
     logger.info("Broadcasted to %d subscriber(s)", len(SUBSCRIBERS))
+
+
+# Build a request handler that serves files from the download base path.
+def build_webserver_handler(directory: Path) -> type[http.server.SimpleHTTPRequestHandler]:
+
+    # Define a custom handler to inject the directory and logging behavior.
+    class RadarRequestHandler(http.server.SimpleHTTPRequestHandler):
+
+        # Initialize the handler with the configured directory.
+        def __init__(self, *args, **kwargs) -> None:
+
+            # Pass the directory to the parent handler for static file serving.
+            super().__init__(*args, directory=str(directory), **kwargs)
+
+        # Route the default HTTP log output through the structured logger.
+        def log_message(self, format, *args) -> None:
+
+            # Emit a structured log line for the web server request.
+            logger.info("Web server: " + format, *args)
+
+    # Return the customized handler class for server creation.
+    return RadarRequestHandler
+
+
+# Start a background HTTP server that exposes the download directory.
+def start_webserver() -> tuple[http.server.ThreadingHTTPServer, threading.Thread]:
+
+    # Ensure the download base directory exists before serving it.
+    base_path.mkdir(parents=True, exist_ok=True)
+
+    # Build the request handler bound to the download directory.
+    handler = build_webserver_handler(base_path)
+
+    # Create the HTTP server bound to the configured host and port.
+    httpd = http.server.ThreadingHTTPServer((WEBSERVER_HOST, WEBSERVER_PORT), handler)
+
+    # Define the background thread that will run the server.
+    thread = threading.Thread(target=httpd.serve_forever, name="webserver", daemon=True)
+
+    # Start the web server thread so it can accept requests.
+    thread.start()
+
+    # Log the web server startup details.
+    logger.info(
+        "Web server enabled on %s:%d serving %s",
+        WEBSERVER_HOST,
+        WEBSERVER_PORT,
+        base_path,
+    )
+
+    # Return the server and thread for shutdown coordination.
+    return httpd, thread
 
 
 # Route connections based on the request path.
@@ -940,6 +1010,18 @@ async def main() -> None:
     # Log the server startup configuration.
     logger.info("Starting WebSocket server on %s:%d", HOST, PORT)
 
+    # Track the optional web server instance for shutdown.
+    webserver: Optional[http.server.ThreadingHTTPServer] = None
+
+    # Track the optional web server thread for shutdown coordination.
+    webserver_thread: Optional[threading.Thread] = None
+
+    # Start the optional web server when enabled in configuration.
+    if WEBSERVER_ENABLED:
+
+        # Spin up the web server in a background thread.
+        webserver, webserver_thread = start_webserver()
+
     # Start the background download loop.
     download_task = asyncio.create_task(download_loop(stop))
 
@@ -971,6 +1053,24 @@ async def main() -> None:
 
         # Ensure the task is fully cancelled.
         await download_task
+
+    # Shut down the optional web server when it is running.
+    if webserver:
+
+        # Log that the web server is stopping.
+        logger.info("Stopping web server")
+
+        # Ask the web server to stop accepting new requests.
+        webserver.shutdown()
+
+        # Close the web server socket.
+        webserver.server_close()
+
+        # Wait briefly for the background thread to exit.
+        if webserver_thread:
+
+            # Join the thread with a timeout to avoid hanging shutdown.
+            webserver_thread.join(timeout=5)
 
     # Log that the server has stopped.
     logger.info("Server stopped.")
