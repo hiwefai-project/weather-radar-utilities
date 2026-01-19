@@ -1,13 +1,13 @@
 # Weather Radar Utilities
 
-Utilities for managing data acquisition and distribution for the Italian Department of Civil Protection weather radar
+Utilities for managing data acquisition and distribution for the Italian Department of Civil Protection's weather radar
 products [link](https://mappe.protezionecivile.gov.it/it/mappe-e-dashboard-rischi/piattaforma-radar/).
 
 The Radar-DPC Platform is an online service by the Italian Civil Protection Department that allows users to visualize
-and access meteorological radar products at national scale, showing both ongoing phenomena and those recorded in recent
-days. It produces maps in (near) real time by processing raw data from the national radar network, rainfall and
+and access meteorological radar products at the national scale, showing both ongoing phenomena and those recorded in recent
+days. It produces maps in (near) real time by processing raw data from the national radar network, rainfall, and
 temperature stations, satellite observations, and the lightning detection network, with contributions from Regions
-(via the Functional Centers Network), ENAV, and the Italian Air Force.
+(via the Functional Centers Network), ENAV and the Italian Air Force.
 
 The platform provides key products such as VMI (Vertical Maximum Intensity) and SRI (Surface Rainfall Intensity)
 updated every 5 minutes, and SRT (Surface Rainfall Total) accumulations (1–24 hours) updated hourly by integrating
@@ -19,7 +19,7 @@ mobile usability, and extended the “history” view to access up to 14 days of
 - **WebSocket client** (`weather-radar-websocket-client.py`): Subscribes to updates and logs incoming product info.
 
 ## Requirements
-- Python 3.9+
+- Python 3.11+
 - Install dependencies:
   ```bash
   pip install -r requirements.txt
