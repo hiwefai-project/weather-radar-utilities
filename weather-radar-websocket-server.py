@@ -117,6 +117,15 @@ interval_seconds = int(download_config.get("interval_seconds", 600))
 # Load the retry delay in seconds between attempts.
 retry_sleep_seconds = download_config.get("retry_sleep_seconds", 60)
 
+# Load the configured simulation starting datetime string.
+simulation_starting_datetime = simulation_config.get("starting_datetime")
+
+# Load the configured simulation time step in seconds.
+simulation_time_step_seconds = int(simulation_config.get("time_step", interval_seconds))
+
+# Ensure the simulation time step is at least one second.
+simulation_time_step_seconds = max(1, simulation_time_step_seconds)
+
 # Extract the WebSocket server configuration section.
 server_config = config.get("websocket_server", {})
 
@@ -151,6 +160,38 @@ if MAGIC_IMPORT_ERROR:
         "python-magic is unavailable; falling back to TIFF header checks (%s)",
         MAGIC_IMPORT_ERROR,
     )
+
+# Parse the simulation start timestamp in ISO UTC format.
+def parse_simulation_starting_datetime(value: Optional[str]) -> Optional[datetime]:
+
+    # Return early when no starting datetime is configured.
+    if not value:
+
+        # Indicate that there is no configured simulation start time.
+        return None
+
+    try:
+
+        # Parse the ISO UTC format like 20251223T120000Z.
+        parsed = datetime.strptime(value, "%Y%m%dT%H%M%SZ")
+
+    except ValueError:
+
+        # Warn when the configured value cannot be parsed.
+        logger.warning(
+            "Invalid simulation starting_datetime %s; expected YYYYMMDDTHHMMSSZ",
+            value,
+        )
+
+        # Return None so callers can fall back safely.
+        return None
+
+    # Attach UTC timezone information to the parsed timestamp.
+    return parsed.replace(tzinfo=pytz.utc)
+
+
+# Normalize the simulation start datetime once at startup.
+simulation_start_time = parse_simulation_starting_datetime(simulation_starting_datetime)
 
 # Determine the cron expression for downloads using the most specific config.
 def resolve_download_cron_expression() -> str:
@@ -197,6 +238,20 @@ if simulation_enabled:
 
     # Inform operators that simulation mode is active.
     logger.info("Simulation mode enabled; source directory: %s", simulation_source_dir)
+
+    # Log the starting time when it is configured.
+    if simulation_start_time:
+
+        # Share the parsed UTC starting datetime for debugging.
+        logger.info("Simulation start time set to %s", simulation_start_time)
+
+    else:
+
+        # Warn that the start time is missing or invalid.
+        logger.warning("Simulation start time not set; using current UTC time")
+
+    # Log the configured simulation time step in seconds.
+    logger.info("Simulation time step set to %s seconds", simulation_time_step_seconds)
 
 # Maintain a set of active subscriber connections.
 SUBSCRIBERS: Set = set()
@@ -360,6 +415,32 @@ def derive_product_type(file_path: Path) -> str:
     return default_product
 
 
+# Build a destination filename for simulated data based on the target time.
+def build_simulation_destination_name(
+    source_file: Path,
+    target_time: datetime,
+    product: str,
+) -> str:
+
+    # Format the target time for filenames (e.g., 20251223Z1200).
+    timestamp = target_time.strftime("%Y%m%dZ%H%M")
+
+    # Split the filename stem to inspect known naming conventions.
+    parts = source_file.stem.split("_")
+
+    # Replace the timestamp segment when a standard naming pattern is present.
+    if len(parts) >= 3:
+
+        # Update the timestamp portion with the simulated time.
+        parts[2] = timestamp
+
+        # Rebuild the filename with the original suffix.
+        return "_".join(parts) + source_file.suffix
+
+    # Fall back to a simple timestamp + product filename when patterns differ.
+    return f"{timestamp}_{product}{source_file.suffix}"
+
+
 # Copy a simulation file into place and build the update payload.
 def copy_simulation_file(
     source_file: Path,
@@ -370,8 +451,18 @@ def copy_simulation_file(
     # Ensure the base path exists for storing the simulated file.
     base_path.mkdir(parents=True, exist_ok=True)
 
-    # Build the destination path using the source filename.
-    destination_file = base_path / source_file.name
+    # Derive the product type from the filename.
+    product = derive_product_type(source_file)
+
+    # Build a destination filename that matches the simulated timestamp.
+    destination_name = build_simulation_destination_name(
+        source_file,
+        target_time,
+        product,
+    )
+
+    # Build the destination path using the simulated filename.
+    destination_file = base_path / destination_name
 
     try:
 
@@ -385,9 +476,6 @@ def copy_simulation_file(
 
         # Skip broadcasting when the file cannot be copied.
         return None
-
-    # Derive the product type from the filename.
-    product = derive_product_type(destination_file)
 
     # Build the public URL for the simulated file when configured.
     file_url = (
@@ -655,25 +743,59 @@ async def download_loop(stop: asyncio.Event) -> None:
     # Build the shared headers for the download API request.
     headers = build_download_headers()
 
+    # Initialize the simulation clock and cron iterator when enabled.
+    if simulation_enabled:
+
+        # Start from the configured simulation time or the current UTC time.
+        simulation_current_time = (
+            simulation_start_time
+            or datetime.now(pytz.utc).replace(second=0, microsecond=0)
+        )
+
+        # Build a cron iterator anchored to the simulated timestamp.
+        simulation_iterator = croniter(download_cron, simulation_current_time)
+
     # Continue downloading until the stop event is set.
     while not stop.is_set():
 
-        # Capture the current time for interval alignment.
-        current_time = datetime.now()
+        # Determine the target timestamp and sleep cadence.
+        if simulation_enabled:
 
-        # Compute the target timestamp for this cycle.
-        target_time = calculate_target_time(current_time)
+            # Use the simulated clock as the target time.
+            target_time = simulation_current_time
 
-        # Calculate the next scheduled boundary for sleeping.
-        next_time = calculate_next_time(current_time)
+            # Advance to the next scheduled simulated timestamp.
+            next_time = simulation_iterator.get_next(datetime)
 
-        # Compute seconds until the next scheduled run.
-        sleep_seconds = int((next_time - current_time).total_seconds())
+            # Use the configured simulation time step for sleeping.
+            sleep_seconds = max(1, simulation_time_step_seconds)
 
-        # Avoid a zero or negative sleep interval.
-        sleep_seconds = max(1, sleep_seconds)
+            # Log the next simulated timestamp for visibility.
+            logger.info(
+                "Next simulated timestamp %s (sleep %s seconds)",
+                next_time,
+                sleep_seconds,
+            )
 
-        logger.info("Next download %s", next_time)
+        else:
+
+            # Capture the current time for interval alignment.
+            current_time = datetime.now()
+
+            # Compute the target timestamp for this cycle.
+            target_time = calculate_target_time(current_time)
+
+            # Calculate the next scheduled boundary for sleeping.
+            next_time = calculate_next_time(current_time)
+
+            # Compute seconds until the next scheduled run.
+            sleep_seconds = int((next_time - current_time).total_seconds())
+
+            # Avoid a zero or negative sleep interval.
+            sleep_seconds = max(1, sleep_seconds)
+
+            # Log the next scheduled download time.
+            logger.info("Next download %s", next_time)
 
         try:
 
@@ -695,8 +817,16 @@ async def download_loop(stop: asyncio.Event) -> None:
         # Only process when the target timestamp changes.
         if last_processed != target_time:
 
-            # Convert the timestamp to UTC for naming conventions.
-            utc_time = local_timezone.localize(target_time, is_dst=None).astimezone(pytz.utc)
+            # Normalize the timestamp to UTC for naming conventions.
+            if simulation_enabled:
+
+                # Use the simulated target time directly in UTC.
+                utc_time = target_time
+
+            else:
+
+                # Convert the local timestamp to UTC for downloads.
+                utc_time = local_timezone.localize(target_time, is_dst=None).astimezone(pytz.utc)
 
             # Convert the timestamp to Unix milliseconds for the API payload.
             unix_time_ms = int(utc_time.timestamp() * 1000)
@@ -767,6 +897,12 @@ async def download_loop(stop: asyncio.Event) -> None:
 
             # Record the timestamp we just processed.
             last_processed = target_time
+
+            # Advance the simulated clock after processing.
+            if simulation_enabled:
+
+                # Update the current simulated time to the next interval.
+                simulation_current_time = next_time
 
 
 
