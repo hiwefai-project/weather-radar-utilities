@@ -1,3 +1,6 @@
+# Import argparse for command-line configuration.
+import argparse
+
 # Import the websocket-client package for WebSocket interactions.
 import websocket
 
@@ -13,88 +16,112 @@ import logging
 # Import Path for loading the shared configuration file.
 from pathlib import Path
 
-# Define the path to the shared JSON configuration file.
-CONFIG_PATH = Path(__file__).with_name("config.json")
+# Define the default path to the shared JSON configuration file.
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.json")
+
+# Build the argument parser for command-line options.
+def build_argument_parser() -> argparse.ArgumentParser:
+
+    # Create the argument parser with a helpful description.
+    parser = argparse.ArgumentParser(
+        description="Weather Radar Websocket Client",
+    )
+
+    # Add an optional config path argument with a sensible default.
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to the JSON configuration file (default: config.json)",
+    )
+
+    # Return the configured parser to the caller.
+    return parser
 
 # Load and return the JSON configuration used by all scripts.
-def load_config() -> dict:
+def load_config(config_path: Path) -> dict:
+
     # Open the configuration file with UTF-8 encoding.
-    with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+    with config_path.open("r", encoding="utf-8") as config_file:
+
         # Parse the JSON payload into a dictionary.
         return json.load(config_file)
 
-# Load the shared configuration once at startup.
-config = load_config()
+# Run the WebSocket client using the provided configuration path.
+def run_client(config_path: Path) -> None:
 
-# Extract the logging configuration section.
-logging_config = config.get("logging", {})
+    # Load the shared configuration from the specified file.
+    config = load_config(config_path)
 
-# Normalize the configured log level to uppercase.
-log_level_name = logging_config.get("level", "INFO").upper()
+    # Extract the logging configuration section.
+    logging_config = config.get("logging", {})
 
-# Resolve the log level or fall back to INFO.
-log_level = getattr(logging, log_level_name, logging.INFO)
+    # Normalize the configured log level to uppercase.
+    log_level_name = logging_config.get("level", "INFO").upper()
 
-# Configure logging with a default INFO level.
-logging.basicConfig(level=log_level)
+    # Resolve the log level or fall back to INFO.
+    log_level = getattr(logging, log_level_name, logging.INFO)
 
-# Create a module-level logger for this client.
-logger = logging.getLogger(__name__)
+    # Configure logging with a default INFO level.
+    logging.basicConfig(level=log_level)
 
-# Extract the WebSocket client configuration section.
-client_config = config.get("websocket_client", {})
+    # Create a module-level logger for this client.
+    logger = logging.getLogger(__name__)
 
-# Define the WebSocket URL for subscribing to updates.
-url_ws = client_config.get("url", "ws://localhost:8765/subscribe")
+    # Extract the WebSocket client configuration section.
+    client_config = config.get("websocket_client", {})
 
-# Define the product type to filter on for logging.
-product_type = client_config.get("product_type", "VMI")
+    # Define the WebSocket URL for subscribing to updates.
+    url_ws = client_config.get("url", "ws://localhost:8765/subscribe")
 
-# Log a startup banner so operators know the client is running.
-logger.info("Weather Radar Websocket Client")
+    # Define the product type to filter on for logging.
+    product_type = client_config.get("product_type", "VMI")
 
-# Handle incoming messages from the server.
-def on_message(ws, message):
+    # Log a startup banner so operators know the client is running.
+    logger.info("Weather Radar Websocket Client")
 
-    # Log the raw message for debugging or audit purposes.
-    logger.info(message)
+    # Log the configuration source path for traceability.
+    logger.info("Using configuration file: %s", config_path)
 
-    # Parse the JSON payload into a Python dictionary.
-    json_message = json.loads(message)
+    # Handle incoming messages from the server.
+    def on_message(ws, message):
 
-    # Check that the message contains a product type field.
-    if "productType" in json_message:
+        # Log the raw message for debugging or audit purposes.
+        logger.info(message)
 
-        # Focus on the configured product type of interest.
-        if json_message["productType"] == product_type:
+        # Parse the JSON payload into a Python dictionary.
+        json_message = json.loads(message)
 
-            # Log the file path associated with the update.
-            logger.info(json_message["file"])
+        # Check that the message contains a product type field.
+        if "productType" in json_message:
 
-            # Log the URL where the product can be fetched.
-            logger.info(json_message["url"])
+            # Focus on the configured product type of interest.
+            if json_message["productType"] == product_type:
 
+                # Log the file path associated with the update.
+                logger.info(json_message["file"])
 
-# Handle errors raised by the websocket-client library.
-def on_error(wsock, error):
+                # Log the URL where the product can be fetched.
+                logger.info(json_message["url"])
 
-    # Log errors at error severity to highlight issues.
-    logger.error(error)
+    # Handle errors raised by the websocket-client library.
+    def on_error(wsock, error):
 
-# Handle the close event from the server.
-def on_close(wsock, close_status_code, close_msg):
+        # Log errors at error severity to highlight issues.
+        logger.error(error)
 
-    # Use debug-level logging for close events to reduce noise.
-    logger.debug("### closed ###")
+    # Handle the close event from the server.
+    def on_close(wsock, close_status_code, close_msg):
 
-# Handle the open event when the connection is established.
-def on_open(wsock):
+        # Use debug-level logging for close events to reduce noise.
+        logger.debug("### closed ###")
 
-    # Use debug-level logging for connection establishment details.
-    logger.debug("Opened connection")
+    # Handle the open event when the connection is established.
+    def on_open(wsock):
 
-# Run the client only when the script is executed directly.
-if __name__ == "__main__":
+        # Use debug-level logging for connection establishment details.
+        logger.debug("Opened connection")
 
     # Enable this for verbose WebSocket tracing.
     #websocket.enableTrace(True)
@@ -116,3 +143,15 @@ if __name__ == "__main__":
 
     # Enter the dispatcher loop to process events.
     rel.dispatch()
+
+# Run the client only when the script is executed directly.
+if __name__ == "__main__":
+
+    # Build the command-line parser for optional config arguments.
+    argument_parser = build_argument_parser()
+
+    # Parse command-line arguments for the configuration path.
+    arguments = argument_parser.parse_args()
+
+    # Execute the client using the requested configuration file.
+    run_client(arguments.config)
