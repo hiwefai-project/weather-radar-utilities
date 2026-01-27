@@ -28,16 +28,16 @@ mobile usability, and extended the “history” view to access up to 14 days of
 ## Quick start
 1. **Start the server**
    ```bash
-   python weather-radar-websocket-server.py
+   python weather-radar-websocket-server.py --config /path/to/config.json
    ```
 
 2. **Start a subscriber**
    ```bash
-   python weather-radar-websocket-client.py
+   python weather-radar-websocket-client.py --config /path/to/config.json
    ```
 
 ## Configuration
-All Python scripts read the shared `config.json` file in the repository root.
+All Python scripts read the shared `config.json` file in the repository root by default. Use `--config` to point at another JSON configuration file when needed.
 
 ### Regular configuration
 Example configuration for live downloads plus the optional static file web server:

@@ -1,3 +1,6 @@
+# Import argparse for command-line configuration.
+import argparse
+
 # Import asyncio for async event loop management.
 import asyncio
 
@@ -59,125 +62,253 @@ from croniter import croniter
 # Import WebSocket server helpers and broadcast utility.
 from websockets.asyncio.server import serve, broadcast
 
-# Define the path to the shared JSON configuration file.
-CONFIG_PATH = Path(__file__).with_name("config.json")
-
-# Load and return the JSON configuration used by all scripts.
-def load_config() -> dict:
-    # Open the configuration file with UTF-8 encoding.
-    with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
-        # Parse the JSON payload into a dictionary.
-        return json.load(config_file)
-
-# Load the shared configuration once at startup.
-config = load_config()
-
-# Extract the logging configuration section.
-logging_config = config.get("logging", {})
-
-# Normalize the configured log level to uppercase.
-log_level_name = logging_config.get("level", "INFO").upper()
-
-# Resolve the log level or fall back to INFO.
-log_level = getattr(logging, log_level_name, logging.INFO)
-
-# Extract the download configuration section.
-download_config = config.get("download", {})
-
-# Extract the simulation configuration section for local playback.
-simulation_config = download_config.get("simulation", {})
-
-# Determine whether simulation mode is enabled.
-simulation_enabled = bool(simulation_config.get("enabled", False))
-
-# Capture the configured simulation source directory.
-simulation_source_dir = Path(simulation_config.get("source_dir", ""))
-
-# Load the maximum retry count for downloads.
-max_trys = download_config.get("max_trys", 7)
-
-# Load the radar API endpoint used for downloads.
-radar_api_url = download_config.get("radar_api_url")
-
-# Load the base URL used to construct file URLs.
-base_url = download_config.get("base_url")
-
-# Load the base filesystem path for storing downloads.
-base_path = Path(download_config.get("base_path", "."))
-
-# Load the list of product types to download.
-products = download_config.get("products", ["VMI"])
-
-# Load the timezone name for timestamp localization.
-timezone_name = download_config.get("timezone", "Europe/Rome")
-
-# Load the cron-style interval string for scheduled downloads.
-interval_expression = download_config.get("interval")
-
-# Load the fallback interval in minutes for legacy configurations.
-interval_minutes = download_config.get("interval_minutes")
-
-# Load the fallback interval in seconds for legacy configurations.
-interval_seconds = int(download_config.get("interval_seconds", 600))
-
-# Load the retry delay in seconds between attempts.
-retry_sleep_seconds = download_config.get("retry_sleep_seconds", 60)
-
-# Load the configured simulation starting datetime string.
-simulation_starting_datetime = simulation_config.get("starting_datetime")
-
-# Load the configured simulation time step in seconds.
-simulation_time_step_seconds = int(simulation_config.get("time_step", interval_seconds))
-
-# Ensure the simulation time step is at least one second.
-simulation_time_step_seconds = max(1, simulation_time_step_seconds)
-
-# Extract the WebSocket server configuration section.
-server_config = config.get("websocket_server", {})
-
-# Extract the optional web server configuration section.
-webserver_config = config.get("webserver_server", {})
-
-# Bind to all interfaces so containers or hosts can connect.
-HOST = server_config.get("host", "0.0.0.0")
-
-# Use the configured port for the WebSocket server.
-PORT = server_config.get("port", 8765)
-
-# Configure the maximum message size.
-MAX_SIZE = server_config.get("max_size", 2**20)
-
-# Configure keepalive ping interval.
-PING_INTERVAL = server_config.get("ping_interval", 20)
-
-# Configure keepalive ping timeout.
-PING_TIMEOUT = server_config.get("ping_timeout", 20)
-
-# Determine whether the optional web server should run.
-WEBSERVER_ENABLED = bool(webserver_config.get("enabled", False))
-
-# Bind the web server to all interfaces by default.
-WEBSERVER_HOST = "0.0.0.0"
-
-# Configure the port for the optional web server.
-WEBSERVER_PORT = int(webserver_config.get("port", 8080))
-
-# Configure logging with timestamps and levels for observability.
-logging.basicConfig(
-    level=log_level,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+# Define the default path to the shared JSON configuration file.
+DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.json")
 
 # Create a named logger for the WebSocket bus.
 logger = logging.getLogger("ws-bus")
 
-# Warn if libmagic is unavailable so users know why validation is limited.
-if MAGIC_IMPORT_ERROR:
-    # Log the missing libmagic dependency with details.
-    logger.warning(
-        "python-magic is unavailable; falling back to TIFF header checks (%s)",
-        MAGIC_IMPORT_ERROR,
+# Initialize configuration defaults so globals are always defined.
+logging_config: dict = {}
+log_level_name = "INFO"
+log_level = logging.INFO
+
+download_config: dict = {}
+simulation_config: dict = {}
+simulation_enabled = False
+simulation_source_dir = Path("")
+max_trys = 7
+radar_api_url = None
+base_url = ""
+base_path = Path(".")
+products = ["VMI"]
+timezone_name = "Europe/Rome"
+interval_expression = None
+interval_minutes = None
+interval_seconds = 600
+retry_sleep_seconds = 60
+simulation_starting_datetime = None
+simulation_time_step_seconds = interval_seconds
+simulation_start_time: Optional[datetime] = None
+
+default_server_config: dict = {}
+default_webserver_config: dict = {}
+
+HOST = "0.0.0.0"
+PORT = 8765
+MAX_SIZE = 2**20
+PING_INTERVAL = 20
+PING_TIMEOUT = 20
+
+WEBSERVER_ENABLED = False
+WEBSERVER_HOST = "0.0.0.0"
+WEBSERVER_PORT = 8080
+
+# Define a placeholder for the resolved cron schedule.
+download_cron = "*/10 * * * *"
+
+# Build the argument parser for command-line options.
+def build_argument_parser() -> argparse.ArgumentParser:
+
+    # Create the argument parser with a helpful description.
+    parser = argparse.ArgumentParser(
+        description="Weather Radar Websocket Server",
     )
+
+    # Add an optional config path argument with a sensible default.
+    parser.add_argument(
+        "--config",
+        "-c",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to the JSON configuration file (default: config.json)",
+    )
+
+    # Return the configured parser to the caller.
+    return parser
+
+# Load and return the JSON configuration used by all scripts.
+def load_config(config_path: Path) -> dict:
+
+    # Open the configuration file with UTF-8 encoding.
+    with config_path.open("r", encoding="utf-8") as config_file:
+
+        # Parse the JSON payload into a dictionary.
+        return json.load(config_file)
+
+# Apply configuration values to module-level settings.
+def configure_from_path(config_path: Path) -> None:
+
+    # Declare global state that will be updated by this configuration.
+    global logging_config
+    global log_level_name
+    global log_level
+    global download_config
+    global simulation_config
+    global simulation_enabled
+    global simulation_source_dir
+    global max_trys
+    global radar_api_url
+    global base_url
+    global base_path
+    global products
+    global timezone_name
+    global interval_expression
+    global interval_minutes
+    global interval_seconds
+    global retry_sleep_seconds
+    global simulation_starting_datetime
+    global simulation_time_step_seconds
+    global simulation_start_time
+    global HOST
+    global PORT
+    global MAX_SIZE
+    global PING_INTERVAL
+    global PING_TIMEOUT
+    global WEBSERVER_ENABLED
+    global WEBSERVER_HOST
+    global WEBSERVER_PORT
+    global download_cron
+
+    # Load the shared configuration from the specified file.
+    config = load_config(config_path)
+
+    # Extract the logging configuration section.
+    logging_config = config.get("logging", {})
+
+    # Normalize the configured log level to uppercase.
+    log_level_name = logging_config.get("level", "INFO").upper()
+
+    # Resolve the log level or fall back to INFO.
+    log_level = getattr(logging, log_level_name, logging.INFO)
+
+    # Configure logging with timestamps and levels for observability.
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
+    # Log the configuration source path for traceability.
+    logger.info("Using configuration file: %s", config_path)
+
+    # Extract the download configuration section.
+    download_config = config.get("download", {})
+
+    # Extract the simulation configuration section for local playback.
+    simulation_config = download_config.get("simulation", {})
+
+    # Determine whether simulation mode is enabled.
+    simulation_enabled = bool(simulation_config.get("enabled", False))
+
+    # Capture the configured simulation source directory.
+    simulation_source_dir = Path(simulation_config.get("source_dir", ""))
+
+    # Load the maximum retry count for downloads.
+    max_trys = download_config.get("max_trys", 7)
+
+    # Load the radar API endpoint used for downloads.
+    radar_api_url = download_config.get("radar_api_url")
+
+    # Load the base URL used to construct file URLs.
+    base_url = download_config.get("base_url", "")
+
+    # Load the base filesystem path for storing downloads.
+    base_path = Path(download_config.get("base_path", "."))
+
+    # Load the list of product types to download.
+    products = download_config.get("products", ["VMI"])
+
+    # Load the timezone name for timestamp localization.
+    timezone_name = download_config.get("timezone", "Europe/Rome")
+
+    # Load the cron-style interval string for scheduled downloads.
+    interval_expression = download_config.get("interval")
+
+    # Load the fallback interval in minutes for legacy configurations.
+    interval_minutes = download_config.get("interval_minutes")
+
+    # Load the fallback interval in seconds for legacy configurations.
+    interval_seconds = int(download_config.get("interval_seconds", 600))
+
+    # Load the retry delay in seconds between attempts.
+    retry_sleep_seconds = download_config.get("retry_sleep_seconds", 60)
+
+    # Load the configured simulation starting datetime string.
+    simulation_starting_datetime = simulation_config.get("starting_datetime")
+
+    # Load the configured simulation time step in seconds.
+    simulation_time_step_seconds = int(simulation_config.get("time_step", interval_seconds))
+
+    # Ensure the simulation time step is at least one second.
+    simulation_time_step_seconds = max(1, simulation_time_step_seconds)
+
+    # Extract the WebSocket server configuration section.
+    server_config = config.get("websocket_server", {})
+
+    # Extract the optional web server configuration section.
+    webserver_config = config.get("webserver_server", {})
+
+    # Bind to all interfaces so containers or hosts can connect.
+    HOST = server_config.get("host", "0.0.0.0")
+
+    # Use the configured port for the WebSocket server.
+    PORT = server_config.get("port", 8765)
+
+    # Configure the maximum message size.
+    MAX_SIZE = server_config.get("max_size", 2**20)
+
+    # Configure keepalive ping interval.
+    PING_INTERVAL = server_config.get("ping_interval", 20)
+
+    # Configure keepalive ping timeout.
+    PING_TIMEOUT = server_config.get("ping_timeout", 20)
+
+    # Determine whether the optional web server should run.
+    WEBSERVER_ENABLED = bool(webserver_config.get("enabled", False))
+
+    # Bind the web server to all interfaces by default.
+    WEBSERVER_HOST = "0.0.0.0"
+
+    # Configure the port for the optional web server.
+    WEBSERVER_PORT = int(webserver_config.get("port", 8080))
+
+    # Warn if libmagic is unavailable so users know why validation is limited.
+    if MAGIC_IMPORT_ERROR:
+
+        # Log the missing libmagic dependency with details.
+        logger.warning(
+            "python-magic is unavailable; falling back to TIFF header checks (%s)",
+            MAGIC_IMPORT_ERROR,
+        )
+
+    # Normalize the simulation start datetime once at startup.
+    simulation_start_time = parse_simulation_starting_datetime(simulation_starting_datetime)
+
+    # Resolve the cron expression once so scheduling is consistent.
+    download_cron = resolve_download_cron_expression()
+
+    # Log the cron expression used for downloads.
+    logger.info("Download cron schedule set to %s", download_cron)
+
+    # Log simulation mode configuration for transparency.
+    if simulation_enabled:
+
+        # Inform operators that simulation mode is active.
+        logger.info("Simulation mode enabled; source directory: %s", simulation_source_dir)
+
+        # Log the starting time when it is configured.
+        if simulation_start_time:
+
+            # Share the parsed UTC starting datetime for debugging.
+            logger.info("Simulation start time set to %s", simulation_start_time)
+
+        else:
+
+            # Warn that the start time is missing or invalid.
+            logger.warning("Simulation start time not set; using current UTC time")
+
+        # Log the configured simulation time step in seconds.
+        logger.info("Simulation time step set to %s seconds", simulation_time_step_seconds)
 
 # Parse the simulation start timestamp in ISO UTC format.
 def parse_simulation_starting_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -206,10 +337,6 @@ def parse_simulation_starting_datetime(value: Optional[str]) -> Optional[datetim
 
     # Attach UTC timezone information to the parsed timestamp.
     return parsed.replace(tzinfo=pytz.utc)
-
-
-# Normalize the simulation start datetime once at startup.
-simulation_start_time = parse_simulation_starting_datetime(simulation_starting_datetime)
 
 # Determine the cron expression for downloads using the most specific config.
 def resolve_download_cron_expression() -> str:
@@ -244,33 +371,6 @@ def resolve_download_cron_expression() -> str:
     # Default to a 10-minute schedule when configuration is ambiguous.
     return "*/10 * * * *"
 
-
-# Resolve the cron expression once so scheduling is consistent.
-download_cron = resolve_download_cron_expression()
-
-# Log the cron expression used for downloads.
-logger.info("Download cron schedule set to %s", download_cron)
-
-# Log simulation mode configuration for transparency.
-if simulation_enabled:
-
-    # Inform operators that simulation mode is active.
-    logger.info("Simulation mode enabled; source directory: %s", simulation_source_dir)
-
-    # Log the starting time when it is configured.
-    if simulation_start_time:
-
-        # Share the parsed UTC starting datetime for debugging.
-        logger.info("Simulation start time set to %s", simulation_start_time)
-
-    else:
-
-        # Warn that the start time is missing or invalid.
-        logger.warning("Simulation start time not set; using current UTC time")
-
-    # Log the configured simulation time step in seconds.
-    logger.info("Simulation time step set to %s seconds", simulation_time_step_seconds)
-
 # Maintain a set of active subscriber connections.
 SUBSCRIBERS: Set = set()
 
@@ -302,7 +402,6 @@ async def subscriber_handler(ws) -> None:
         # Log the updated subscriber count.
         logger.info("Subscriber disconnected (%d total)", len(SUBSCRIBERS))
 
-
 # Broadcast a JSON-serializable payload to all connected subscribers.
 async def broadcast_update(payload: dict) -> None:
 
@@ -324,7 +423,6 @@ async def broadcast_update(payload: dict) -> None:
     # Log how many subscribers received the update.
     logger.info("Broadcasted to %d subscriber(s)", len(SUBSCRIBERS))
 
-
 # Build a request handler that serves files from the download base path.
 def build_webserver_handler(directory: Path) -> type[http.server.SimpleHTTPRequestHandler]:
 
@@ -345,7 +443,6 @@ def build_webserver_handler(directory: Path) -> type[http.server.SimpleHTTPReque
 
     # Return the customized handler class for server creation.
     return RadarRequestHandler
-
 
 # Start a background HTTP server that exposes the download directory.
 def start_webserver() -> tuple[http.server.ThreadingHTTPServer, threading.Thread]:
@@ -375,7 +472,6 @@ def start_webserver() -> tuple[http.server.ThreadingHTTPServer, threading.Thread
 
     # Return the server and thread for shutdown coordination.
     return httpd, thread
-
 
 # Route connections based on the request path.
 async def route(ws) -> None:
@@ -451,7 +547,6 @@ def load_simulation_files(source_dir: Path) -> list[Path]:
     # Return the sorted file list for playback.
     return files
 
-
 # Derive the product type from a filename or fall back to configuration.
 def derive_product_type(file_path: Path) -> str:
 
@@ -469,7 +564,6 @@ def derive_product_type(file_path: Path) -> str:
 
     # Fall back to the configured product type when parsing fails.
     return default_product
-
 
 # Build a destination filename for simulated data based on the target time.
 def build_simulation_destination_name(
@@ -495,7 +589,6 @@ def build_simulation_destination_name(
 
     # Fall back to a simple timestamp + product filename when patterns differ.
     return f"{timestamp}_{product}{source_file.suffix}"
-
 
 # Copy a simulation file into place and build the update payload.
 def copy_simulation_file(
@@ -552,7 +645,6 @@ def copy_simulation_file(
         # Provide the public URL for the product.
         "url": file_url,
     }
-
 
 # Detect whether a file is a TIFF image using libmagic or header checks.
 def is_tiff_file(path: Path) -> bool:
@@ -747,7 +839,6 @@ def calculate_target_time(current_time: datetime) -> datetime:
     # Select the previous scheduled time to ensure data availability.
     return iterator.get_prev(datetime)
 
-
 # Compute the next scheduled download time for sleeping.
 def calculate_next_time(current_time: datetime) -> datetime:
 
@@ -759,7 +850,6 @@ def calculate_next_time(current_time: datetime) -> datetime:
 
     # Select the next scheduled time for the sleep boundary.
     return iterator.get_next(datetime)
-
 
 # Download radar data at the configured interval and notify subscribers.
 async def download_loop(stop: asyncio.Event) -> None:
@@ -944,9 +1034,8 @@ async def download_loop(stop: asyncio.Event) -> None:
 
 
 
-
 # Entry point that runs the server and waits for shutdown signals.
-async def main() -> None:
+async def run_async_server() -> None:
 
     # Create an event to coordinate graceful shutdown.
     stop = asyncio.Event()
@@ -1041,8 +1130,23 @@ async def main() -> None:
     # Log that the server has stopped.
     logger.info("Server stopped.")
 
+# Run the server using command-line configuration.
+def run_server() -> None:
+
+    # Build the command-line parser for optional config arguments.
+    argument_parser = build_argument_parser()
+
+    # Parse command-line arguments for the configuration path.
+    arguments = argument_parser.parse_args()
+
+    # Apply configuration values before starting the server.
+    configure_from_path(arguments.config)
+
+    # Run the async server in the asyncio event loop.
+    asyncio.run(run_async_server())
+
 # Guard the async entry point for direct execution.
 if __name__ == "__main__":
 
-    # Run the main coroutine in the asyncio event loop.
-    asyncio.run(main())
+    # Execute the server when the script is called directly.
+    run_server()
